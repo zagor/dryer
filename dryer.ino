@@ -11,8 +11,6 @@
 #define INSENSOR_PIN  7
 #define OUTSENSOR_PIN 8
 
-#define WAIT_TIME  300
-#define WAIT_VENT_TIME 10
 #define MIN_VENT_TEMP  35
 #define MIN_VENT_TIME  10
 #define CYCLE_TIME     120
@@ -28,8 +26,7 @@ enum {
    HEAT,
    FLOAT,
    VENT,
-   WAIT, /* laundry is dry, wait for extraction */
-   WAIT_VENT /* periodic venting to avoid humidity buildup */
+   DONE, /* laundry is dry, wait for turn-off */
 } state = OFF;
 
 char* statestring[] = {
@@ -240,8 +237,7 @@ static void display(void)
                  done_time / 3600, (done_time % 3600) / 60);
          break;
          
-      case WAIT:
-      case WAIT_VENT:
+      case DONE:
          sprintf(line, "%-11s%dt%2dm", statestring[state], 
                  done_time / 3600, (done_time % 3600) / 60);
          break;
@@ -332,21 +328,23 @@ void loop(void)
     if ((global_time % 3) == 0) {
         readsensor();
 
+#if 0
         if ((global_time % 15) == 0)
             eeprom_log();
+#endif
     }
 
     if (!countdown) {
         int noreset = 0;
  
         /* are we done? */
-        if ((state && state < WAIT) &&
+        if ((state && state < DONE) &&
             (global_time >= MIN_DRYING_TIME) &&
             (humidity[IN] <= (humidity[OUT] + HUMID_MARGIN)))
         {
             fan(0);
             heater(0);
-            state = WAIT_VENT; /* activate WAIT_VENT => WAIT switch */
+            state = DONE;
             done_time = global_time;
         }
 
@@ -398,20 +396,6 @@ void loop(void)
                 //heater(1);
                 state = HEAT;
                 countdown = CYCLE_TIME - vent_time;
-                break;
-
-            case WAIT:
-                fan(1);
-                heater(0);
-                state = WAIT_VENT;
-                countdown = WAIT_VENT_TIME;
-                break;
-
-            case WAIT_VENT:
-                fan(0);
-                heater(0);
-                state = WAIT;
-                countdown = WAIT_TIME;
                 break;
         }
         if (!noreset)
