@@ -1,8 +1,20 @@
+#include <limits.h>
+#ifdef MOCK
+#include "mock.h"
+#else
 #include <avr/wdt.h>
-#include <Wire.h> 
-#include <LiquidCrystal_I2C.h>
-#include <DHT22.h>
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h> // by Frank de Brabander
+#include <DHT.h>
+#endif
+
+//#define EEPROM
+//#define EEPROM_DUMP
+
+#ifdef EEPROM
 #include <EEPROM.h>
+#endif
+
 
 // i/o pins:
 #define SWITCH_PIN 2
@@ -13,76 +25,50 @@
 
 #define MIN_VENT_TEMP  35
 #define MIN_VENT_TIME  10
-#define CYCLE_TIME     120
+#define CYCLE_TIME      120
 #define MIN_DRYING_TIME 600
+#define OBSERVE_TIME   300
 
 #define FULLVENT_MIN_TEMP 40
-#define FULLVENT_HUM_OFFSET 5
-
-#define HUMID_MARGIN 1 // stop when inside humidity is 1g more than outside
+#define FULLVENT_HUM_OFFSET 15
 
 enum {
    OFF,
    HEAT,
-   FLOAT,
    VENT,
+   OBSERVE,
    DONE, /* laundry is dry, wait for turn-off */
 } state = OFF;
 
-char* statestring[] = {
+const char* statestring[] = {
     "Avst\xe1ngd",
     "V\xe1rmer",
-    "V\xe1ntar",
     "Ventilerar",
-    "Klar",
-    "Klar flakt"
+    "Slutm\xe1ter",
+    "Klar"
 };
 
 enum { IN=0, OUT };
 
 static int countdown = 0;
 static int humidity[2] = {0, 0};
-static int temp[2] = {0, 0};
-static int rh[2] = {0, 0};
-static char* sensor_error[2] = {NULL, NULL};
+static float temp[2] = {0, 0};
 static int global_time = 0;
-static int done_time = 0;
 static int cold_start = 1;
 static int fan_on = 0;
 static int heat_on = 0;
+static int restart_count = 0;
+static int observe_end = 0;
 
 const float kuniv   = 8.31447215;    // universal gas constant, J mol-1 K-1
 const float MH2O    = 18.01534;      // molar mass of water, g mol-1
 const float Mdry    = 28.9644;       // molar mass of dry air, g mol-1
 
 // global device inits
-DHT22 insensor(INSENSOR_PIN);
-DHT22 outsensor(OUTSENSOR_PIN);
-DHT22* sensors[2] = { &insensor, &outsensor };
+DHT insensor(INSENSOR_PIN, DHT22);
+DHT outsensor(OUTSENSOR_PIN, DHT22);
+DHT* sensors[2] = { &insensor, &outsensor };
 LiquidCrystal_I2C lcd(0x27,16,2);  // i2c address to 0x27, 16x2 chars display
-
-static char* dhterr(int errcode)
-{
-  switch(errcode)
-  {
-    case DHT_ERROR_CHECKSUM:
-      return "checksum";
-    case DHT_BUS_HUNG:
-      return "bus hung";
-    case DHT_ERROR_NOT_PRESENT:
-      return "no senso";
-    case DHT_ERROR_ACK_TOO_LONG:
-      return "ack t/o";
-    case DHT_ERROR_SYNC_TIMEOUT:
-      return "sync t/o";
-    case DHT_ERROR_DATA_TIMEOUT:
-      return "data t/o";
-    case DHT_ERROR_TOOQUICK:
-      return "too fast";
-  }
-  
-  return NULL;
-}
 
 // H2O saturation pressure from Lowe & Ficke, 1974
 float h2opsat(float t)
@@ -142,6 +128,8 @@ static int switched_on(void)
   return !digitalRead(SWITCH_PIN); /* active low */
 }
 
+#ifdef EEPROM
+
 static void pwrite(int addr, int val)
 {
   /* only write if value changed */
@@ -156,7 +144,7 @@ static void eeprom_log(void)
      address = 2;
      return;
    }
-   
+
    /* don't wrap */
    if (address > 1022)
      return;
@@ -168,7 +156,7 @@ static void eeprom_log(void)
    int val2 = humidity[IN];
    if (fan_on)
       val2 |= 0x80;
-   
+
    pwrite(address++, val1);
    pwrite(address++, val2);
    pwrite(0, (address-2) >> 8);
@@ -192,26 +180,18 @@ static void eeprom_dump(void)
      Serial.print(line);
   }
 }
+#endif
 
 static void readsensor(void)
 {
-  DHT22_ERROR_t errorCode;
-
   int i;
-  
+
   for (i=0; i<2; i++) {
-    DHT22* s = sensors[i];
-    errorCode = s->readData();
-    if (!errorCode) {
-      rh[i] = (s->getHumidity() + 0.5);
-      temp[i] = (s->getTemperatureC() + 0.5);
-      sensor_error[i] = NULL;
-      humidity[i] = rh2sh(temp[i], rh[i]);
-    }
-    else {
-      sensor_error[i] = dhterr(errorCode);
-    }
-  } 
+    DHT* s = sensors[i];
+    float rh = s->readHumidity();
+    temp[i] = s->readTemperature();
+    humidity[i] = rh2sh(temp[i], rh);
+  }
 }
 
 static void display(void)
@@ -219,12 +199,10 @@ static void display(void)
   char line[20];
   char buf[2][9];
   int i;
-  
+
   for (i=0; i<2; i++) {
-    if (sensor_error[i])
-      snprintf(buf[i], sizeof(buf[i]), "%s", sensor_error[i]);
-    else
-      snprintf(buf[i], sizeof(buf[i]), "%dg %d\337", humidity[i], temp[i]);
+      snprintf(buf[i], sizeof(buf[i]), "%dg %d\337", humidity[i],
+               (int)(temp[i] + 0.5));
   }
   sprintf(line, "%-8s%8s", buf[0], buf[1]);
   lcd.home();
@@ -232,24 +210,17 @@ static void display(void)
 
   switch (state)
   {
-      case OFF:
-         sprintf(line, "%-11s%dt%2dm", statestring[state], 
-                 done_time / 3600, (done_time % 3600) / 60);
-         break;
-         
-      case DONE:
-         sprintf(line, "%-11s%dt%2dm", statestring[state], 
-                 done_time / 3600, (done_time % 3600) / 60);
-         break;
-         
+      case OBSERVE: {
+          int remain = observe_end - global_time;
+          sprintf(line, "%-11s%dm%2ds", statestring[state],
+                  remain / 60, remain % 60);
+          break;
+      }
+
       default:
-#if 1
-         sprintf(line, "%-11s%dt%2dm", statestring[state], 
-                 global_time / 3600, (global_time % 3600) / 60);
-#else
-         sprintf(line,"%-11s%02d:%02d", statestring[state],
-                 countdown / 60, countdown % 60);
-#endif
+          sprintf(line, "%-11s%dt%2dm", statestring[state],
+                  global_time / 3600, (global_time % 3600) / 60);
+          break;
   }
 
   lcd.setCursor(0,1);
@@ -265,7 +236,7 @@ void setup(void)
 
   pinMode(SWITCH_PIN, INPUT);
   digitalWrite(SWITCH_PIN, HIGH); /* enable pull-up */
-  
+
   /* if the power switch is on, this was a watchdog reset.
      if so, run a parameter check rather than start heating */
   if (switched_on()) {
@@ -281,7 +252,7 @@ void setup(void)
   lcd.setCursor(0,1);
   lcd.print(__DATE__);
 
-#if 0 // <-- set to 1 to dump eeprom log
+#ifdef EEPROM_DUMP // <-- set to 1 to dump eeprom log
   lcd.print("SERIAL");
   delay(2000);
   Serial.begin(115200);
@@ -289,6 +260,8 @@ void setup(void)
   while(1);
 #endif
 
+  sensors[0]->begin();
+  sensors[1]->begin();
   delay(2000); /* give the DHT22s time to warm up */
 
   wdt_enable(WDTO_4S); /* enable watchdog, 4s timeout */
@@ -296,6 +269,7 @@ void setup(void)
 
 int x = 0;
 
+/*
 void testdisplay(void)
 {
    int i;
@@ -311,12 +285,24 @@ void testdisplay(void)
    lcd.print(buf); 
    x += 16;
 }
+*/
+
+void start(void)
+{
+    fan(0);
+    heater(1);
+    state = HEAT;
+    countdown = CYCLE_TIME;
+    reset_lcd();
+    global_time = 0;
+    restart_count = 0;
+}
 
 void loop(void)
 {
     static int vent_time = 0;
 
-#if 0
+#ifdef EEPROM
     testdisplay();
     delay(2000);
     wdt_reset(); /* pat watchdog */
@@ -324,53 +310,51 @@ void loop(void)
 #endif
 
     wdt_reset(); /* pat watchdog */
-   
-    if ((global_time % 3) == 0) {
-        readsensor();
 
-#if 0
+    if ((global_time % 3) == 0) {
+        static int readcount = 0;
+        readsensor();
+        if (++readcount == 2) {
+            // reading is slooow
+            global_time++;
+            readcount = 0;
+        }
+
+#ifdef EEPROM
         if ((global_time % 15) == 0)
             eeprom_log();
 #endif
     }
 
     if (!countdown) {
-        int noreset = 0;
- 
         /* are we done? */
-        if ((state && state < DONE) &&
+        if ((state && state < OBSERVE) &&
             (global_time >= MIN_DRYING_TIME) &&
-            (humidity[IN] <= (humidity[OUT] + HUMID_MARGIN)))
+            (humidity[IN] <= humidity[OUT]))
         {
             fan(0);
             heater(0);
-            state = DONE;
-            done_time = global_time;
+            state = OBSERVE;
+            countdown = 5;
+            observe_end = global_time + OBSERVE_TIME;
         }
 
-        /* go to next state */
+        /* change state? */
         switch (state) {
 
             case OFF:
                 if (switched_on()) {
-                    fan(0);
-                    heater(1);
-                    state = HEAT;
-                    countdown = CYCLE_TIME;
-                    global_time = 0;
+                    start();
                 }
-                else
-                    noreset = 1;
                 break;
-            
+
             case HEAT:
                 /* don't vent until air is at least a little warm */
                 if (temp[IN] < MIN_VENT_TEMP) {
                     countdown = CYCLE_TIME;
-                    noreset = 1;
                     break;
                 }
-         
+
                 /* go to next state: VENT */
                 fan(1);
                 //heater(0);
@@ -379,6 +363,7 @@ void loop(void)
                 if (vent_time < MIN_VENT_TIME)
                    vent_time = MIN_VENT_TIME;
                 countdown = vent_time;
+                reset_lcd();
                 break;
 
             case VENT:
@@ -396,10 +381,30 @@ void loop(void)
                 //heater(1);
                 state = HEAT;
                 countdown = CYCLE_TIME - vent_time;
+                reset_lcd();
+                break;
+
+            case OBSERVE:
+                /* After cycle is completed, observe humidity for X min
+                 * to see if it rises again.
+                 */
+                if (global_time >= observe_end) {
+                    state = DONE;
+                    break;
+                }
+
+                if (humidity[IN] > humidity[OUT]) {
+                    fan(0);
+                    heater(1);
+                    state = HEAT;
+                    countdown = MIN_DRYING_TIME;
+                    restart_count++;
+                }
+                break;
+
+            case DONE:
                 break;
         }
-        if (!noreset)
-            reset_lcd();
     }
 
     if (state && !switched_on()) {
@@ -411,7 +416,7 @@ void loop(void)
     }
 
     display();
-    
+
     delay(1000);
 
     global_time++;
@@ -420,3 +425,64 @@ void loop(void)
         countdown--;
 }
 
+#ifdef MOCK
+void mock_loop(void)
+{
+    static int hum_peak = 0;
+    static int restart_state = 0;
+
+    if (mock_heater) {
+        if (insensor.temp < 60)
+            insensor.temp += 0.07;
+    }
+    else
+        insensor.temp -= 0.01;
+
+    if (!hum_peak) {
+        insensor.hum += 0.1;
+        if (insensor.hum >= 100) {
+            insensor.hum = 100;
+            printf("hum peak!\n");
+            hum_peak = 1;
+        }
+    }
+
+    if (mock_fan) {
+        insensor.temp -= insensor.temp / 300;
+        insensor.hum -= 0.1;
+    }
+
+    if (state == 3 && restart_state < 2) {
+        restart_state = 1;
+        insensor.hum += 0.1;
+    }
+    if (state == 2 && restart_state == 1)
+        restart_state = 3;
+
+    if (mock_time / 1000 % 10 == 0)
+        printf("time: %02d:%02d state %d, in %.1f° %dg (%.1f%%), out %.1f° %dg\n",
+               mock_time / 1000 / 60,
+               mock_time / 1000 % 60,
+               state,
+               temp[IN], humidity[IN], insensor.hum,
+               temp[OUT], humidity[OUT]);
+    mock_switch = 0;
+}
+
+int main(void) {
+  setup();
+  do {
+    loop();
+    mock_loop();
+  } while (state != 4);
+
+  printf("%-11s%dt%2dm\n", statestring[state],
+         global_time / 3600, (global_time % 3600) / 60);
+
+  mock_switch = 1;
+  loop();
+
+  printf("%-11s%dt%2dm\n", statestring[state],
+          global_time / 3600, (global_time % 3600) / 60);
+}
+#endif
