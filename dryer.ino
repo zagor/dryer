@@ -316,7 +316,8 @@ void loop(void)
         readsensor();
         if (++readcount == 2) {
             // reading is slooow
-            global_time++;
+            if (state > OFF && state < DONE)
+                global_time++;
             readcount = 0;
         }
 
@@ -419,7 +420,8 @@ void loop(void)
 
     delay(1000);
 
-    global_time++;
+    if (state > OFF && state < DONE)
+      global_time++;
 
     if (countdown)
         countdown--;
@@ -476,6 +478,9 @@ int main(void) {
     mock_loop();
   } while (state != 4);
 
+  for (int i=0; i<20; i++)
+    loop();
+
   printf("%-11s%dt%2dm\n", statestring[state],
          global_time / 3600, (global_time % 3600) / 60);
 
@@ -483,6 +488,6 @@ int main(void) {
   loop();
 
   printf("%-11s%dt%2dm\n", statestring[state],
-          global_time / 3600, (global_time % 3600) / 60);
+         global_time / 3600, (global_time % 3600) / 60);
 }
 #endif
