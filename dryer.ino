@@ -8,14 +8,6 @@
 #include <DHT.h>
 #endif
 
-//#define EEPROM
-//#define EEPROM_DUMP
-
-#ifdef EEPROM
-#include <EEPROM.h>
-#endif
-
-
 // i/o pins:
 #define SWITCH_PIN 2
 #define HEATER_PIN 3
@@ -128,60 +120,6 @@ static int switched_on(void)
   return !digitalRead(SWITCH_PIN); /* active low */
 }
 
-#ifdef EEPROM
-
-static void pwrite(int addr, int val)
-{
-  /* only write if value changed */
-  if (EEPROM.read(addr) != val)
-    EEPROM.write(addr, val);
-}
-
-static void eeprom_log(void)
-{
-   static int address = 2;
-   if (state == OFF) {
-     address = 2;
-     return;
-   }
-
-   /* don't wrap */
-   if (address > 1022)
-     return;
-
-   int val1 = temp[IN];
-   if (heat_on)
-      val1 |= 0x80;
-
-   int val2 = humidity[IN];
-   if (fan_on)
-      val2 |= 0x80;
-
-   pwrite(address++, val1);
-   pwrite(address++, val2);
-   pwrite(0, (address-2) >> 8);
-   pwrite(1, (address-2) & 0xff);
-}
-
-static void eeprom_dump(void)
-{
-  int i;
-  int count = (EEPROM.read(0) << 8) | EEPROM.read(1);
-  if (count > 1022)
-    count = 1022;
-  char line[40];
-
-  for (i=0; i < count; i+=2
-  ) {
-     int val1 = EEPROM.read(i + 2);
-     int val2 = EEPROM.read(i + 3);
-     sprintf(line, "%d,%d,%d,%d,%d\n", i, val1 & 0x7f, val1 >> 7, val2 & 0x7f
-     , val2 >> 7);
-     Serial.print(line);
-  }
-}
-#endif
-
 static void readsensor(void)
 {
   int i;
@@ -201,7 +139,7 @@ static void display(void)
   int i;
 
   for (i=0; i<2; i++) {
-      snprintf(buf[i], sizeof(buf[i]), "%dg %d\337", humidity[i],
+      snprintf(buf[i], sizeof(buf[i]), "%dg %d\xdf", humidity[i],
                (int)(temp[i] + 0.5));
   }
   sprintf(line, "%-8s%8s", buf[0], buf[1]);
@@ -216,6 +154,12 @@ static void display(void)
                   remain / 60, remain % 60);
           break;
       }
+
+      case DONE:
+          sprintf(line, "%-8s%d\xeb %dt%2dm", statestring[state],
+                  restart_count,
+                  global_time / 3600, (global_time % 3600) / 60);
+          break;
 
       default:
           sprintf(line, "%-11s%dt%2dm", statestring[state],
@@ -252,40 +196,12 @@ void setup(void)
   lcd.setCursor(0,1);
   lcd.print(__DATE__);
 
-#ifdef EEPROM_DUMP // <-- set to 1 to dump eeprom log
-  lcd.print("SERIAL");
-  delay(2000);
-  Serial.begin(115200);
-  eeprom_dump();
-  while(1);
-#endif
-
   sensors[0]->begin();
   sensors[1]->begin();
   delay(2000); /* give the DHT22s time to warm up */
 
   wdt_enable(WDTO_4S); /* enable watchdog, 4s timeout */
 }
-
-int x = 0;
-
-/*
-void testdisplay(void)
-{
-   int i;
-   lcd.home();
-   char buf[24];
-   sprintf(buf, "%02x", x);
-   lcd.print(buf);
-   for (int i=0; i<16; i++) {
-       if (x+i);
-         buf[i] = x + i;
-   }
-   lcd.setCursor(0,1);
-   lcd.print(buf); 
-   x += 16;
-}
-*/
 
 void start(void)
 {
@@ -301,17 +217,11 @@ void start(void)
 void loop(void)
 {
     static int vent_time = 0;
-
-#ifdef EEPROM
-    testdisplay();
-    delay(2000);
-    wdt_reset(); /* pat watchdog */
-    return;
-#endif
+    static int tempcount = 0;
 
     wdt_reset(); /* pat watchdog */
 
-    if ((global_time % 3) == 0) {
+    if ((tempcount % 3) == 0) {
         static int readcount = 0;
         readsensor();
         if (++readcount == 2) {
@@ -320,12 +230,8 @@ void loop(void)
                 global_time++;
             readcount = 0;
         }
-
-#ifdef EEPROM
-        if ((global_time % 15) == 0)
-            eeprom_log();
-#endif
     }
+    tempcount++;
 
     if (!countdown) {
         /* are we done? */
@@ -478,16 +384,15 @@ int main(void) {
     mock_loop();
   } while (state != 4);
 
-  for (int i=0; i<20; i++)
+  for (int i=0; i<20; i++) {
     loop();
-
-  printf("%-11s%dt%2dm\n", statestring[state],
-         global_time / 3600, (global_time % 3600) / 60);
+    mock_loop();
+  }
 
   mock_switch = 1;
-  loop();
-
-  printf("%-11s%dt%2dm\n", statestring[state],
-         global_time / 3600, (global_time % 3600) / 60);
+  for (int i=0; i<20; i++) {
+    loop();
+    mock_loop();
+  }
 }
 #endif
