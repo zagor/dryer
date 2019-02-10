@@ -62,6 +62,9 @@ DHT outsensor(OUTSENSOR_PIN, DHT22);
 DHT* sensors[2] = { &insensor, &outsensor };
 LiquidCrystal_I2C lcd(0x27,16,2);  // i2c address to 0x27, 16x2 chars display
 
+// null pointer execution = reset
+void (*reset) (void) = 0;
+
 // H2O saturation pressure from Lowe & Ficke, 1974
 float h2opsat(float t)
 {
@@ -129,6 +132,11 @@ static void readsensor(void)
     float rh = s->readHumidity();
     temp[i] = s->readTemperature();
     humidity[i] = rh2sh(temp[i], rh);
+
+    if (temp[i] == 0) {
+      /* temp is never 0, sensor driver is confused. reset! */
+      reset();
+    }
   }
 }
 
@@ -196,9 +204,9 @@ void setup(void)
   lcd.setCursor(0,1);
   lcd.print(__DATE__);
 
+  delay(2000); /* give the DHT22s time to warm up */
   sensors[0]->begin();
   sensors[1]->begin();
-  delay(2000); /* give the DHT22s time to warm up */
 
   wdt_enable(WDTO_4S); /* enable watchdog, 4s timeout */
 }
