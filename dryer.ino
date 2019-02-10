@@ -14,6 +14,7 @@
 #define FAN_PIN    4
 #define INSENSOR_PIN  7
 #define OUTSENSOR_PIN 8
+#define SENSOR_POWER_PIN 9
 
 #define MIN_VENT_TEMP  35
 #define MIN_VENT_TIME  10
@@ -102,7 +103,7 @@ static void reset_lcd()
    /* for display robustness, reset lcd after every relay throw */
    delay(200); /* wait briefly for power-on pulse to fade */
    wdt_reset(); /* pat watchdog */
-   lcd.init();
+   lcd.begin();
    lcd.backlight();
 }
 
@@ -133,8 +134,10 @@ static void readsensor(void)
     temp[i] = s->readTemperature();
     humidity[i] = rh2sh(temp[i], rh);
 
-    if (temp[i] == 0) {
-      /* temp is never 0, sensor driver is confused. reset! */
+    if (humidity[i] < 1) {
+      /* sensor driver is confused. reset! */
+      lcd.setCursor(0,1);
+      lcd.print("Reset!     ");
       reset();
     }
   }
@@ -147,8 +150,8 @@ static void display(void)
   int i;
 
   for (i=0; i<2; i++) {
-      snprintf(buf[i], sizeof(buf[i]), "%dg %d\xdf", humidity[i],
-               (int)(temp[i] + 0.5));
+    snprintf(buf[i], sizeof(buf[i]), "%dg %d\xdf", humidity[i],
+             (int)(temp[i] + 0.5));
   }
   sprintf(line, "%-8s%8s", buf[0], buf[1]);
   lcd.home();
@@ -185,6 +188,8 @@ void setup(void)
   digitalWrite(HEATER_PIN, LOW);
   pinMode(FAN_PIN, OUTPUT);
   digitalWrite(FAN_PIN, LOW);
+  pinMode(SENSOR_POWER_PIN, OUTPUT);
+  digitalWrite(SENSOR_POWER_PIN, HIGH);
 
   pinMode(SWITCH_PIN, INPUT);
   digitalWrite(SWITCH_PIN, HIGH); /* enable pull-up */
@@ -198,15 +203,15 @@ void setup(void)
      global_time = MIN_DRYING_TIME;
   }
 
-  lcd.init();
+  lcd.begin();
   lcd.backlight();
   lcd.print("Startar...");
   lcd.setCursor(0,1);
   lcd.print(__DATE__);
 
-  delay(2000); /* give the DHT22s time to warm up */
   sensors[0]->begin();
   sensors[1]->begin();
+  delay(2000); /* give the DHT22s time to warm up */
 
   wdt_enable(WDTO_4S); /* enable watchdog, 4s timeout */
 }
@@ -225,7 +230,7 @@ void start(void)
 void loop(void)
 {
     static int vent_time = 0;
-    static int tempcount = 0;
+    static unsigned tempcount = 0;
 
     wdt_reset(); /* pat watchdog */
 
