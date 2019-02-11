@@ -194,11 +194,11 @@ void setup(void)
   pinMode(SWITCH_PIN, INPUT);
   digitalWrite(SWITCH_PIN, HIGH); /* enable pull-up */
 
-  /* if the power switch is on, this was a watchdog reset.
+  /* if the power switch is on, this was a reset.
      if so, run a parameter check rather than start heating */
   if (switched_on()) {
      cold_start = 0;
-     state = HEAT;
+     state = OFF;
      countdown = 0;
      global_time = MIN_DRYING_TIME;
   }
