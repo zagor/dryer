@@ -46,12 +46,13 @@ enum { IN=0, OUT };
 static int countdown = 0;
 static int humidity[2] = {0, 0};
 static float temp[2] = {0, 0};
-static int global_time = 0;
-static int cold_start = 1;
+static int run_time = 0;
+static int last_run_time = 0;
 static int fan_on = 0;
 static int heat_on = 0;
 static int restart_count = 0;
 static int observe_end = 0;
+static unsigned long start_time = 0;
 
 const float kuniv   = 8.31447215;    // universal gas constant, J mol-1 K-1
 const float MH2O    = 18.01534;      // molar mass of water, g mol-1
@@ -63,7 +64,7 @@ DHT outsensor(OUTSENSOR_PIN, DHT22);
 DHT* sensors[2] = { &insensor, &outsensor };
 LiquidCrystal_I2C lcd(0x27,16,2);  // i2c address to 0x27, 16x2 chars display
 
-// null pointer execution = reset
+// null pointer execution = reset vector
 void (*reset) (void) = 0;
 
 // H2O saturation pressure from Lowe & Ficke, 1974
@@ -160,7 +161,7 @@ static void display(void)
   switch (state)
   {
       case OBSERVE: {
-          int remain = observe_end - global_time;
+          int remain = observe_end - run_time;
           sprintf(line, "%-11s%dm%2ds", statestring[state],
                   remain / 60, remain % 60);
           break;
@@ -169,12 +170,12 @@ static void display(void)
       case DONE:
           sprintf(line, "%-8s%d\xeb %dt%2dm", statestring[state],
                   restart_count,
-                  global_time / 3600, (global_time % 3600) / 60);
+                  last_run_time / 3600, (last_run_time % 3600) / 60);
           break;
 
       default:
           sprintf(line, "%-11s%dt%2dm", statestring[state],
-                  global_time / 3600, (global_time % 3600) / 60);
+                  run_time / 3600, (run_time % 3600) / 60);
           break;
   }
 
@@ -197,10 +198,8 @@ void setup(void)
   /* if the power switch is on, this was a reset.
      if so, run a parameter check rather than start heating */
   if (switched_on()) {
-     cold_start = 0;
      state = OFF;
      countdown = 0;
-     global_time = MIN_DRYING_TIME;
   }
 
   lcd.begin();
@@ -223,40 +222,34 @@ void start(void)
     state = HEAT;
     countdown = CYCLE_TIME;
     reset_lcd();
-    global_time = 0;
     restart_count = 0;
+    start_time = millis();
 }
 
 void loop(void)
 {
     static int vent_time = 0;
     static unsigned tempcount = 0;
+    unsigned long elapsed_time = millis() - start_time;
+    run_time = elapsed_time / 1000;
 
     wdt_reset(); /* pat watchdog */
 
-    if ((tempcount % 3) == 0) {
-        static int readcount = 0;
+    if ((tempcount % 3) == 0)
         readsensor();
-        if (++readcount == 2) {
-            // reading is slooow
-            if (state > OFF && state < DONE)
-                global_time++;
-            readcount = 0;
-        }
-    }
     tempcount++;
 
     if (!countdown) {
         /* are we done? */
         if ((state && state < OBSERVE) &&
-            (global_time >= MIN_DRYING_TIME) &&
+            (run_time >= MIN_DRYING_TIME) &&
             (humidity[IN] <= humidity[OUT]))
         {
             fan(0);
             heater(0);
             state = OBSERVE;
-            countdown = 5;
-            observe_end = global_time + OBSERVE_TIME;
+            countdown = 5000;
+            observe_end = run_time + OBSERVE_TIME;
         }
 
         /* change state? */
@@ -271,7 +264,7 @@ void loop(void)
             case HEAT:
                 /* don't vent until air is at least a little warm */
                 if (temp[IN] < MIN_VENT_TEMP) {
-                    countdown = CYCLE_TIME;
+                    countdown = CYCLE_TIME * 1000;
                     break;
                 }
 
@@ -282,7 +275,7 @@ void loop(void)
                 vent_time = CYCLE_TIME * humidity[IN] / 200;
                 if (vent_time < MIN_VENT_TIME)
                    vent_time = MIN_VENT_TIME;
-                countdown = vent_time;
+                countdown = vent_time * 1000;
                 reset_lcd();
                 break;
 
@@ -292,7 +285,7 @@ void loop(void)
                 {
                     /* in fullvent mode, keep ventilating until
                        limits are reached */
-                    countdown = 5;
+                    countdown = 5000;
                     break;
                 }
 
@@ -300,7 +293,7 @@ void loop(void)
                 fan(0);
                 //heater(1);
                 state = HEAT;
-                countdown = CYCLE_TIME - vent_time;
+                countdown = (CYCLE_TIME - vent_time) * 1000;
                 reset_lcd();
                 break;
 
@@ -308,16 +301,18 @@ void loop(void)
                 /* After cycle is completed, observe humidity for X min
                  * to see if it rises again.
                  */
-                if (global_time >= observe_end) {
+                if (run_time >= observe_end) {
                     state = DONE;
+		    last_run_time = elapsed_time / 1000;
                     break;
                 }
 
                 if (humidity[IN] > humidity[OUT]) {
+		    /* not dry yet */
                     fan(0);
                     heater(1);
                     state = HEAT;
-                    countdown = MIN_DRYING_TIME;
+                    countdown = CYCLE_TIME * 1000;
                     restart_count++;
                 }
                 break;
@@ -339,11 +334,11 @@ void loop(void)
 
     delay(1000);
 
-    if (state > OFF && state < DONE)
-      global_time++;
-
-    if (countdown)
-        countdown--;
+    if (countdown) {
+	    countdown -= elapsed_time;
+	    if (countdown < 0)
+		    countdown = 0;
+    }
 }
 
 #ifdef MOCK
