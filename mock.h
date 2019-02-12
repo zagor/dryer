@@ -24,6 +24,7 @@ class DHT {
   double hum;
 
   DHT(int pin, int type) {
+    (void)type;
     temp = 22;
     hum = 60;
     if (pin == 7)
@@ -39,7 +40,7 @@ class DHT {
 class LiquidCrystal_I2C {
  public:
   LiquidCrystal_I2C(int, int, int) {}
-  void init() {}
+  void begin() {}
   void home() {}
   void backlight() {}
   void print(const char* line) {
@@ -48,8 +49,9 @@ class LiquidCrystal_I2C {
   void setCursor(int, int) {}
 };
 
+int  millis(void) { return mock_time; }
 void delay(int time) { mock_time += time; }
-void wdt_enable(int time) {}
+void wdt_enable(int time) {(void)time;}
 void wdt_reset() {}
 void digitalWrite(int pin, int on) {
   if (pin == 3) {
@@ -69,9 +71,13 @@ void digitalWrite(int pin, int on) {
 }
 
 int digitalRead(int pin) {
+  (void)pin;
   /* power switch */
   return mock_switch;
 }
 
-void pinMode(int pin, int mode) {}
+void pinMode(int pin, int mode) {
+  (void)pin;
+  (void)mode;
+}
 

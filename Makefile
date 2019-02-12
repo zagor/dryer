@@ -1,2 +1,2 @@
 dryer: dryer.ino mock.h
-	g++ -x c++ -Wall -DMOCK -o $@ $<
+	g++ -x c++ -Wall -Wextra -Wpedantic -DMOCK -o $@ $<
